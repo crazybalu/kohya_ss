@@ -3,6 +3,13 @@ import os
 
 import regex
 import torch
+try:
+    import intel_extension_for_pytorch as ipex
+    if torch.xpu.is_available():
+        from library.ipex import ipex_init
+        ipex_init()
+except Exception:
+    pass
 import open_clip
 from library import sdxl_model_util, sdxl_train_util, train_util
 
@@ -13,10 +20,13 @@ class SdxlTextualInversionTrainer(train_textual_inversion.TextualInversionTraine
     def __init__(self):
         super().__init__()
         self.vae_scale_factor = sdxl_model_util.VAE_SCALE_FACTOR
+        self.is_sdxl = True
 
     def assert_extra_args(self, args, train_dataset_group):
         super().assert_extra_args(args, train_dataset_group)
-        sdxl_train_util.verify_sdxl_training_args(args)
+        sdxl_train_util.verify_sdxl_training_args(args, supportTextEncoderCaching=False)
+
+        train_dataset_group.verify_bucket_reso_steps(32)
 
     def load_target_model(self, args, weight_dtype, accelerator):
         (
@@ -27,29 +37,17 @@ class SdxlTextualInversionTrainer(train_textual_inversion.TextualInversionTraine
             unet,
             logit_scale,
             ckpt_info,
-        ) = sdxl_train_util.load_target_model(args, accelerator, sdxl_model_util.MODEL_VERSION_SDXL_BASE_V0_9, weight_dtype)
+        ) = sdxl_train_util.load_target_model(args, accelerator, sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, weight_dtype)
 
         self.load_stable_diffusion_format = load_stable_diffusion_format
         self.logit_scale = logit_scale
         self.ckpt_info = ckpt_info
 
-        return sdxl_model_util.MODEL_VERSION_SDXL_BASE_V0_9, [text_encoder1, text_encoder2], vae, unet
+        return sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, [text_encoder1, text_encoder2], vae, unet
 
     def load_tokenizer(self, args):
         tokenizer = sdxl_train_util.load_tokenizers(args)
         return tokenizer
-
-    def assert_token_string(self, token_string, tokenizers):
-        # tokenizer 1 is seems to be ok
-
-        # count words for token string: regular expression from open_clip
-        pat = regex.compile(r"""'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+""", regex.IGNORECASE)
-        words = regex.findall(pat, token_string)
-        word_count = len(words)
-        assert word_count == 1, (
-            f"token string {token_string} contain {word_count} words, please don't use digits, punctuation, or special characters"
-            + f" / トークン文字列 {token_string} には{word_count}個の単語が含まれています。数字、句読点、特殊文字は使用しないでください"
-        )
 
     def get_text_cond(self, args, accelerator, batch, tokenizers, text_encoders, weight_dtype):
         input_ids1 = batch["input_ids"]
@@ -57,8 +55,8 @@ class SdxlTextualInversionTrainer(train_textual_inversion.TextualInversionTraine
         with torch.enable_grad():
             input_ids1 = input_ids1.to(accelerator.device)
             input_ids2 = input_ids2.to(accelerator.device)
-            encoder_hidden_states1, encoder_hidden_states2, pool2 = sdxl_train_util.get_hidden_states(
-                args,
+            encoder_hidden_states1, encoder_hidden_states2, pool2 = train_util.get_hidden_states_sdxl(
+                args.max_token_length,
                 input_ids1,
                 input_ids2,
                 tokenizers[0],
@@ -91,7 +89,7 @@ class SdxlTextualInversionTrainer(train_textual_inversion.TextualInversionTraine
             accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet, prompt_replacement
         )
 
-    def save_weights(self, file, updated_embs, save_dtype):
+    def save_weights(self, file, updated_embs, save_dtype, metadata):
         state_dict = {"clip_l": updated_embs[0], "clip_g": updated_embs[1]}
 
         if save_dtype is not None:
@@ -103,7 +101,7 @@ class SdxlTextualInversionTrainer(train_textual_inversion.TextualInversionTraine
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import save_file
 
-            save_file(state_dict, file)
+            save_file(state_dict, file, metadata)
         else:
             torch.save(state_dict, file)
 
@@ -115,8 +113,8 @@ class SdxlTextualInversionTrainer(train_textual_inversion.TextualInversionTraine
         else:
             data = torch.load(file, map_location="cpu")
 
-        emb_l = data.get("clib_l", None)  # ViT-L text encoder 1
-        emb_g = data.get("clib_g", None)  # BiG-G text encoder 2
+        emb_l = data.get("clip_l", None)  # ViT-L text encoder 1
+        emb_g = data.get("clip_g", None)  # BiG-G text encoder 2
 
         assert (
             emb_l is not None or emb_g is not None

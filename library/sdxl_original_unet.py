@@ -39,8 +39,9 @@ CONTEXT_DIM: int = 2048
 MODEL_CHANNELS: int = 320
 TIME_EMBED_DIM = 320 * 4
 
+USE_REENTRANT = True
 
-# region memory effcient attention
+# region memory efficient attention
 
 # FlashAttentionを使うCrossAttention
 # based on https://github.com/lucidrains/memory-efficient-attention-pytorch/blob/main/memory_efficient_attention_pytorch/flash_attention.py
@@ -322,7 +323,7 @@ class ResnetBlock2D(nn.Module):
 
                 return custom_forward
 
-            x = torch.utils.checkpoint.checkpoint(create_custom_forward(self.forward_body), x, emb)
+            x = torch.utils.checkpoint.checkpoint(create_custom_forward(self.forward_body), x, emb, use_reentrant=USE_REENTRANT)
         else:
             x = self.forward_body(x, emb)
 
@@ -356,7 +357,9 @@ class Downsample2D(nn.Module):
 
                 return custom_forward
 
-            hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(self.forward_body), hidden_states)
+            hidden_states = torch.utils.checkpoint.checkpoint(
+                create_custom_forward(self.forward_body), hidden_states, use_reentrant=USE_REENTRANT
+            )
         else:
             hidden_states = self.forward_body(hidden_states)
 
@@ -641,7 +644,9 @@ class BasicTransformerBlock(nn.Module):
 
                 return custom_forward
 
-            output = torch.utils.checkpoint.checkpoint(create_custom_forward(self.forward_body), hidden_states, context, timestep)
+            output = torch.utils.checkpoint.checkpoint(
+                create_custom_forward(self.forward_body), hidden_states, context, timestep, use_reentrant=USE_REENTRANT
+            )
         else:
             output = self.forward_body(hidden_states, context, timestep)
 
@@ -734,24 +739,6 @@ class Transformer2DModel(nn.Module):
 
         return output
 
-    def forward_xxx(self, hidden_states, encoder_hidden_states=None, timestep=None):
-        if self.training and self.gradient_checkpointing:
-            # print("Transformer2DModel: Using gradient checkpointing")
-
-            def create_custom_forward(func):
-                def custom_forward(*inputs):
-                    return func(*inputs)
-
-                return custom_forward
-
-            output = torch.utils.checkpoint.checkpoint(
-                create_custom_forward(self.forward_body), hidden_states, encoder_hidden_states, timestep
-            )
-        else:
-            output = self.forward_body(hidden_states, encoder_hidden_states, timestep)
-
-        return output
-
 
 class Upsample2D(nn.Module):
     def __init__(self, channels, out_channels):
@@ -800,7 +787,9 @@ class Upsample2D(nn.Module):
 
                 return custom_forward
 
-            hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(self.forward_body), hidden_states, output_size)
+            hidden_states = torch.utils.checkpoint.checkpoint(
+                create_custom_forward(self.forward_body), hidden_states, output_size, use_reentrant=USE_REENTRANT
+            )
         else:
             hidden_states = self.forward_body(hidden_states, output_size)
 

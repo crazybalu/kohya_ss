@@ -9,6 +9,13 @@ import random
 from einops import repeat
 import numpy as np
 import torch
+try:
+    import intel_extension_for_pytorch as ipex
+    if torch.xpu.is_available():
+        from library.ipex import ipex_init
+        ipex_init()
+except Exception:
+    pass
 from tqdm import tqdm
 from transformers import CLIPTokenizer
 from diffusers import EulerDiscreteScheduler
@@ -86,6 +93,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--prompt", type=str, default="A photo of a cat")
+    parser.add_argument("--prompt2", type=str, default=None)
     parser.add_argument("--negative_prompt", type=str, default="")
     parser.add_argument("--output_dir", type=str, default=".")
     parser.add_argument(
@@ -93,10 +101,13 @@ if __name__ == "__main__":
         type=str,
         nargs="*",
         default=[],
-        help="LoRA weights, only supports networks.lora, each arguement is a `path;multiplier` (semi-colon separated)",
+        help="LoRA weights, only supports networks.lora, each argument is a `path;multiplier` (semi-colon separated)",
     )
     parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
+
+    if args.prompt2 is None:
+        args.prompt2 = args.prompt
 
     # HuggingFaceのmodel id
     text_encoder_1_name = "openai/clip-vit-large-patch14"
@@ -108,7 +119,7 @@ if __name__ == "__main__":
     # 本体RAMが少ない場合はGPUにロードするといいかも
     # If the main RAM is small, it may be better to load it on the GPU
     text_model1, text_model2, vae, unet, _, _ = sdxl_model_util.load_models_from_sdxl_checkpoint(
-        sdxl_model_util.MODEL_VERSION_SDXL_BASE_V0_9, args.ckpt_path, "cpu"
+        sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, args.ckpt_path, "cpu"
     )
 
     # Text Encoder 1はSDXL本体でもHuggingFaceのものを使っている
@@ -142,7 +153,8 @@ if __name__ == "__main__":
     text_model2.eval()
 
     unet.set_use_memory_efficient_attention(True, False)
-    vae.set_use_memory_efficient_attention_xformers(True)
+    if torch.__version__ >= "2.0.0": # PyTorch 2.0.0 以上対応のxformersなら以下が使える
+        vae.set_use_memory_efficient_attention_xformers(True)
 
     # Tokenizers
     tokenizer1 = CLIPTokenizer.from_pretrained(text_encoder_1_name)
@@ -169,7 +181,7 @@ if __name__ == "__main__":
         beta_schedule=SCHEDLER_SCHEDULE,
     )
 
-    def generate_image(prompt, negative_prompt, seed=None):
+    def generate_image(prompt, prompt2, negative_prompt, seed=None):
         # 将来的にサイズ情報も変えられるようにする / Make it possible to change the size information in the future
         # prepare embedding
         with torch.no_grad():
@@ -184,7 +196,7 @@ if __name__ == "__main__":
             # crossattn
 
         # Text Encoderを二つ呼ぶ関数  Function to call two Text Encoders
-        def call_text_encoder(text):
+        def call_text_encoder(text, text2):
             # text encoder 1
             batch_encoding = tokenizer1(
                 text,
@@ -203,24 +215,24 @@ if __name__ == "__main__":
 
             # text encoder 2
             with torch.no_grad():
-                tokens = tokenizer2(text).to(DEVICE)
+                tokens = tokenizer2(text2).to(DEVICE)
 
                 enc_out = text_model2(tokens, output_hidden_states=True, return_dict=True)
                 text_embedding2_penu = enc_out["hidden_states"][-2]
                 # print("hidden_states2", text_embedding2_penu.shape)
-                text_embedding2_pool = enc_out["text_embeds"]
+                text_embedding2_pool = enc_out["text_embeds"]   # do not support Textual Inversion
 
             # 連結して終了 concat and finish
             text_embedding = torch.cat([text_embedding1, text_embedding2_penu], dim=2)
             return text_embedding, text_embedding2_pool
 
         # cond
-        c_ctx, c_ctx_pool = call_text_encoder(prompt)
+        c_ctx, c_ctx_pool = call_text_encoder(prompt, prompt2)
         # print(c_ctx.shape, c_ctx_p.shape, c_vector.shape)
         c_vector = torch.cat([c_ctx_pool, c_vector], dim=1)
 
         # uncond
-        uc_ctx, uc_ctx_pool = call_text_encoder(negative_prompt)
+        uc_ctx, uc_ctx_pool = call_text_encoder(negative_prompt, negative_prompt)
         uc_vector = torch.cat([uc_ctx_pool, uc_vector], dim=1)
 
         text_embeddings = torch.cat([uc_ctx, c_ctx])
@@ -295,19 +307,22 @@ if __name__ == "__main__":
             img.save(os.path.join(args.output_dir, f"image_{timestamp}_{i:03d}.png"))
 
     if not args.interactive:
-        generate_image(args.prompt, args.negative_prompt, seed)
+        generate_image(args.prompt, args.prompt2, args.negative_prompt, seed)
     else:
         # loop for interactive
         while True:
             prompt = input("prompt: ")
             if prompt == "":
                 break
+            prompt2 = input("prompt2: ")
+            if prompt2 == "":
+                prompt2 = prompt
             negative_prompt = input("negative prompt: ")
             seed = input("seed: ")
             if seed == "":
                 seed = None
             else:
                 seed = int(seed)
-            generate_image(prompt, negative_prompt, seed)
+            generate_image(prompt, prompt2, negative_prompt, seed)
 
     print("Done!")

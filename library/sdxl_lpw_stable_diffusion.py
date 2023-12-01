@@ -18,7 +18,7 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput, 
 from diffusers.utils import logging
 from PIL import Image
 
-from library import sdxl_model_util, sdxl_train_util
+from library import sdxl_model_util, sdxl_train_util, train_util
 
 
 try:
@@ -210,7 +210,7 @@ def pad_tokens_and_weights(tokens, weights, max_length, bos, eos, pad, no_boseos
     return tokens, weights
 
 
-def get_hidden_states(text_encoder, input_ids, is_sdxl_text_encoder2: bool, device):
+def get_hidden_states(text_encoder, input_ids, is_sdxl_text_encoder2: bool, eos_token_id, device):
     if not is_sdxl_text_encoder2:
         # text_encoder1: same as SD1/2
         enc_out = text_encoder(input_ids.to(text_encoder.device), output_hidden_states=True, return_dict=True)
@@ -220,7 +220,8 @@ def get_hidden_states(text_encoder, input_ids, is_sdxl_text_encoder2: bool, devi
         # text_encoder2
         enc_out = text_encoder(input_ids.to(text_encoder.device), output_hidden_states=True, return_dict=True)
         hidden_states = enc_out["hidden_states"][-2]  # penuultimate layer
-        pool = enc_out["text_embeds"]
+        # pool = enc_out["text_embeds"]
+        pool = train_util.pool_workaround(text_encoder, enc_out["last_hidden_state"], input_ids, eos_token_id)
     hidden_states = hidden_states.to(device)
     if pool is not None:
         pool = pool.to(device)
@@ -261,7 +262,7 @@ def get_unweighted_text_embeddings(
                         text_input_chunk[j, 1] = eos
 
             text_embedding, current_text_pool = get_hidden_states(
-                pipe.text_encoder, text_input_chunk, is_sdxl_text_encoder2, pipe.device
+                pipe.text_encoder, text_input_chunk, is_sdxl_text_encoder2, eos, pipe.device
             )
             if text_pool is None:
                 text_pool = current_text_pool
@@ -280,7 +281,7 @@ def get_unweighted_text_embeddings(
             text_embeddings.append(text_embedding)
         text_embeddings = torch.concat(text_embeddings, axis=1)
     else:
-        text_embeddings, text_pool = get_hidden_states(pipe.text_encoder, text_input, is_sdxl_text_encoder2, pipe.device)
+        text_embeddings, text_pool = get_hidden_states(pipe.text_encoder, text_input, is_sdxl_text_encoder2, eos, pipe.device)
     return text_embeddings, text_pool
 
 
@@ -1005,6 +1006,7 @@ class SdxlStableDiffusionLongPromptWeightingPipeline:
 
             # predict the noise residual
             noise_pred = self.unet(latent_model_input, t, text_embedding, vector_embedding)
+            noise_pred = noise_pred.to(dtype)  # U-Net changes dtype in LoRA training
 
             # perform guidance
             if do_classifier_free_guidance:
@@ -1026,20 +1028,13 @@ class SdxlStableDiffusionLongPromptWeightingPipeline:
                 if is_cancelled_callback is not None and is_cancelled_callback():
                     return None
 
+        return latents
+
+    def latents_to_image(self, latents):
         # 9. Post-processing
-        image = self.decode_latents(latents.to(torch.float32))
-
-        # 10. Run safety checker
-        image, has_nsfw_concept = image, None  #  self.run_safety_checker(image, device, text_embeddings.dtype)
-
-        # 11. Convert to PIL
-        if output_type == "pil":
-            image = self.numpy_to_pil(image)
-
-        if not return_dict:
-            return image, has_nsfw_concept
-
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+        image = self.decode_latents(latents.to(self.vae.dtype))
+        image = self.numpy_to_pil(image)
+        return image
 
     # copy from pil_utils.py
     def numpy_to_pil(self, images: np.ndarray) -> Image.Image:
