@@ -98,31 +98,31 @@ def sync_bits_and_bytes_files():
         log.error(f'An unexpected error occurred: {e}')
 
 
-def install_kohya_ss_torch1():
-    setup_common.check_repo_version()
-    setup_common.check_python()
+# def install_kohya_ss_torch1():
+#     setup_common.check_repo_version()
+#     setup_common.check_python()
 
-    # Upgrade pip if needed
-    setup_common.install('--upgrade pip')
+#     # Upgrade pip if needed
+#     setup_common.install('--upgrade pip')
 
-    if setup_common.check_torch() == 2:
-        input(
-            f'{YELLOW}\nTorch 2 is already installed in the venv. To install Torch 1 delete the venv and re-run setup.bat\n\nHit enter to continue...{RESET_COLOR}'
-        )
-        return
+#     if setup_common.check_torch() == 2:
+#         input(
+#             f'{YELLOW}\nTorch 2 is already installed in the venv. To install Torch 1 delete the venv and re-run setup.bat\n\nHit enter to continue...{RESET_COLOR}'
+#         )
+#         return
 
-    # setup_common.install(
-    #     'torch==1.12.1+cu116 torchvision==0.13.1+cu116 --index-url https://download.pytorch.org/whl/cu116',
-    #     'torch torchvision'
-    # )
-    # setup_common.install(
-    #     'https://github.com/C43H66N12O12S2/stable-diffusion-webui/releases/download/f/xformers-0.0.14.dev0-cp310-cp310-win_amd64.whl -U -I --no-deps',
-    #     'xformers-0.0.14'
-    # )
-    setup_common.install_requirements('requirements_windows_torch1.txt', check_no_verify_flag=False)
-    sync_bits_and_bytes_files()
-    setup_common.configure_accelerate(run_accelerate=True)
-    # run_cmd(f'accelerate config')
+#     # setup_common.install(
+#     #     'torch==1.12.1+cu116 torchvision==0.13.1+cu116 --index-url https://download.pytorch.org/whl/cu116',
+#     #     'torch torchvision'
+#     # )
+#     # setup_common.install(
+#     #     'https://github.com/C43H66N12O12S2/stable-diffusion-webui/releases/download/f/xformers-0.0.14.dev0-cp310-cp310-win_amd64.whl -U -I --no-deps',
+#     #     'xformers-0.0.14'
+#     # )
+#     setup_common.install_requirements('requirements_windows_torch1.txt', check_no_verify_flag=False)
+#     sync_bits_and_bytes_files()
+#     setup_common.configure_accelerate(run_accelerate=True)
+#     # run_cmd(f'accelerate config')
 
 
 def install_kohya_ss_torch2():
@@ -132,11 +132,11 @@ def install_kohya_ss_torch2():
     # Upgrade pip if needed
     setup_common.install('--upgrade pip')
 
-    if setup_common.check_torch() == 1:
-        input(
-            f'{YELLOW}\nTorch 1 is already installed in the venv. To install Torch 2 delete the venv and re-run setup.bat\n\nHit any key to acknowledge.{RESET_COLOR}'
-        )
-        return
+    # if setup_common.check_torch() == 1:
+    #     input(
+    #         f'{YELLOW}\nTorch 1 is already installed in the venv. To install Torch 2 delete the venv and re-run setup.bat\n\nHit any key to acknowledge.{RESET_COLOR}'
+    #     )
+    #     return
 
     # setup_common.install(
     #     'torch==2.0.1+cu118 torchvision==0.15.2+cu118 --index-url https://download.pytorch.org/whl/cu118',
@@ -149,13 +149,26 @@ def install_kohya_ss_torch2():
     # run_cmd(f'accelerate config')
 
 
+def install_bitsandbytes_0_35_0():
+    log.info('Installing bitsandbytes 0.35.0...')
+    setup_common.install('--upgrade bitsandbytes==0.35.0', 'bitsandbytes 0.35.0', reinstall=True)
+    sync_bits_and_bytes_files()
+
+def install_bitsandbytes_0_40_1():
+    log.info('Installing bitsandbytes 0.40.1...')
+    setup_common.install('--upgrade https://github.com/jllllll/bitsandbytes-windows-webui/releases/download/wheels/bitsandbytes-0.40.1.post1-py3-none-win_amd64.whl', 'bitsandbytes 0.40.1', reinstall=True)
+
+def install_bitsandbytes_0_41_1():
+    log.info('Installing bitsandbytes 0.41.1...')
+    setup_common.install('--upgrade https://github.com/jllllll/bitsandbytes-windows-webui/releases/download/wheels/bitsandbytes-0.41.1-py3-none-win_amd64.whl', 'bitsandbytes 0.41.1', reinstall=True)
+
 def main_menu():
     setup_common.clear_screen()
     while True:
         print('\nKohya_ss GUI setup menu:\n')
         print('1. Install kohya_ss gui')
-        print('2. (Optional) Install cudann files')
-        print('3. (Optional) Install bitsandbytes-windows')
+        print('2. (Optional) Install cudann files (avoid unless you really need it)')
+        print('3. (Optional) Install specific bitsandbytes versions')
         print('4. (Optional) Manually configure accelerate')
         print('5. (Optional) Start Kohya_ss GUI in browser')
         print('6. Quit')
@@ -164,27 +177,52 @@ def main_menu():
         print('')
 
         if choice == '1':
+            install_kohya_ss_torch2()
+            # while True:
+            #     print('1. Torch 1 (legacy, no longer supported. Will be removed in v21.9.x)')
+            #     print('2. Torch 2 (recommended)')
+            #     print('3. Cancel')
+            #     choice_torch = input('\nEnter your choice: ')
+            #     print('')
+
+            #     if choice_torch == '1':
+            #         install_kohya_ss_torch1()
+            #         break
+            #     elif choice_torch == '2':
+            #         install_kohya_ss_torch2()
+            #         break
+            #     elif choice_torch == '3':
+            #         break
+            #     else:
+            #         print('Invalid choice. Please enter a number between 1-3.')
+        elif choice == '2':
+            cudann_install()
+        elif choice == '3':
             while True:
-                print('1. Torch 1 (legacy)')
-                print('2. Torch 2 (recommended)')
-                print('3. Cancel')
+                print('1. (Optional) Force installation of bitsandbytes 0.35.0')
+                print('2. (Optional) Force installation of bitsandbytes 0.40.1 for new optimizer options support and pre-bugfix results')
+                print('3. (Optional) Force installation of bitsandbytes 0.41.1 for new optimizer options support')
+                print('4. (Danger) Install bitsandbytes-windows (this package has been reported to cause issues for most... avoid...)')
+                print('5. Cancel')
                 choice_torch = input('\nEnter your choice: ')
                 print('')
 
                 if choice_torch == '1':
-                    install_kohya_ss_torch1()
+                    install_bitsandbytes_0_35_0()
                     break
                 elif choice_torch == '2':
-                    install_kohya_ss_torch2()
+                    install_bitsandbytes_0_40_1()
                     break
                 elif choice_torch == '3':
+                    install_bitsandbytes_0_41_1()
+                    break
+                elif choice_torch == '4':
+                    setup_common.install('--upgrade bitsandbytes-windows', reinstall=True)
+                    break
+                elif choice_torch == '5':
                     break
                 else:
                     print('Invalid choice. Please enter a number between 1-3.')
-        elif choice == '2':
-            cudann_install()
-        elif choice == '3':
-            setup_common.install('--upgrade bitsandbytes-windows', reinstall=True)
         elif choice == '4':
             setup_common.run_cmd('accelerate config')
         elif choice == '5':

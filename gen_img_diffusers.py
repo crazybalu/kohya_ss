@@ -65,6 +65,16 @@ import re
 import diffusers
 import numpy as np
 import torch
+
+try:
+    import intel_extension_for_pytorch as ipex
+
+    if torch.xpu.is_available():
+        from library.ipex import ipex_init
+
+        ipex_init()
+except Exception:
+    pass
 import torchvision
 from diffusers import (
     AutoencoderKL,
@@ -937,6 +947,17 @@ class PipelineLike:
         if self.control_nets:
             guided_hints = original_control_net.get_guided_hints(self.control_nets, num_latent_input, batch_size, clip_guide_images)
 
+        if reginonal_network:
+            num_sub_and_neg_prompts = len(text_embeddings) // batch_size
+            # last subprompt and negative prompt
+            text_emb_last = []
+            for j in range(batch_size):
+                text_emb_last.append(text_embeddings[(j + 1) * num_sub_and_neg_prompts - 2])
+                text_emb_last.append(text_embeddings[(j + 1) * num_sub_and_neg_prompts - 1])
+            text_emb_last = torch.stack(text_emb_last)
+        else:
+            text_emb_last = text_embeddings
+
         for i, t in enumerate(tqdm(timesteps)):
             # expand the latents if we are doing classifier free guidance
             latent_model_input = latents.repeat((num_latent_input, 1, 1, 1))
@@ -944,11 +965,6 @@ class PipelineLike:
 
             # predict the noise residual
             if self.control_nets and self.control_net_enabled:
-                if reginonal_network:
-                    num_sub_and_neg_prompts = len(text_embeddings) // batch_size
-                    text_emb_last = text_embeddings[num_sub_and_neg_prompts - 2 :: num_sub_and_neg_prompts]  # last subprompt
-                else:
-                    text_emb_last = text_embeddings
                 noise_pred = original_control_net.call_unet_and_control_net(
                     i,
                     num_latent_input,
@@ -958,6 +974,7 @@ class PipelineLike:
                     i / len(timesteps),
                     latent_model_input,
                     t,
+                    text_embeddings,
                     text_emb_last,
                 ).sample
             else:
@@ -2349,12 +2366,19 @@ def main(args):
         network_default_muls = []
         network_pre_calc = args.network_pre_calc
 
+        # merge関連の引数を統合する
+        if args.network_merge:
+            network_merge = len(args.network_module)  # all networks are merged
+        elif args.network_merge_n_models:
+            network_merge = args.network_merge_n_models
+        else:
+            network_merge = 0
+
         for i, network_module in enumerate(args.network_module):
             print("import network module:", network_module)
             imported_module = importlib.import_module(network_module)
 
             network_mul = 1.0 if args.network_mul is None or len(args.network_mul) <= i else args.network_mul[i]
-            network_default_muls.append(network_mul)
 
             net_kwargs = {}
             if args.network_args and i < len(args.network_args):
@@ -2365,31 +2389,32 @@ def main(args):
                     key, value = net_arg.split("=")
                     net_kwargs[key] = value
 
-            if args.network_weights and i < len(args.network_weights):
-                network_weight = args.network_weights[i]
-                print("load network weights from:", network_weight)
-
-                if model_util.is_safetensors(network_weight) and args.network_show_meta:
-                    from safetensors.torch import safe_open
-
-                    with safe_open(network_weight, framework="pt") as f:
-                        metadata = f.metadata()
-                    if metadata is not None:
-                        print(f"metadata for: {network_weight}: {metadata}")
-
-                network, weights_sd = imported_module.create_network_from_weights(
-                    network_mul, network_weight, vae, text_encoder, unet, for_inference=True, **net_kwargs
-                )
-            else:
+            if args.network_weights is None or len(args.network_weights) <= i:
                 raise ValueError("No weight. Weight is required.")
+
+            network_weight = args.network_weights[i]
+            print("load network weights from:", network_weight)
+
+            if model_util.is_safetensors(network_weight) and args.network_show_meta:
+                from safetensors.torch import safe_open
+
+                with safe_open(network_weight, framework="pt") as f:
+                    metadata = f.metadata()
+                if metadata is not None:
+                    print(f"metadata for: {network_weight}: {metadata}")
+
+            network, weights_sd = imported_module.create_network_from_weights(
+                network_mul, network_weight, vae, text_encoder, unet, for_inference=True, **net_kwargs
+            )
             if network is None:
                 return
 
             mergeable = network.is_mergeable()
-            if args.network_merge and not mergeable:
+            if network_merge and not mergeable:
                 print("network is not mergiable. ignore merge option.")
 
-            if not args.network_merge or not mergeable:
+            if not mergeable or i >= network_merge:
+                # not merging
                 network.apply_to(text_encoder, unet)
                 info = network.load_state_dict(weights_sd, False)  # network.load_weightsを使うようにするとよい
                 print(f"weights are loaded: {info}")
@@ -2403,6 +2428,7 @@ def main(args):
                     network.backup_weights()
 
                 networks.append(network)
+                network_default_muls.append(network_mul)
             else:
                 network.merge_to(text_encoder, unet, weights_sd, dtype, device)
 
@@ -2698,9 +2724,18 @@ def main(args):
 
         size = None
         for i, network in enumerate(networks):
-            if i < 3:
+            if (i < 3 and args.network_regional_mask_max_color_codes is None) or i < args.network_regional_mask_max_color_codes:
                 np_mask = np.array(mask_images[0])
-                np_mask = np_mask[:, :, i]
+
+                if args.network_regional_mask_max_color_codes:
+                    # カラーコードでマスクを指定する
+                    ch0 = (i + 1) & 1
+                    ch1 = ((i + 1) >> 1) & 1
+                    ch2 = ((i + 1) >> 2) & 1
+                    np_mask = np.all(np_mask == np.array([ch0, ch1, ch2]) * 255, axis=2)
+                    np_mask = np_mask.astype(np.uint8) * 255
+                else:
+                    np_mask = np_mask[:, :, i]
                 size = np_mask.shape
             else:
                 np_mask = np.full(size, 255, dtype=np.uint8)
@@ -2745,6 +2780,10 @@ def main(args):
     for gen_iter in range(args.n_iter):
         print(f"iteration {gen_iter+1}/{args.n_iter}")
         iter_seed = random.randint(0, 0x7FFFFFFF)
+
+        # shuffle prompt list
+        if args.shuffle_prompts:
+            random.shuffle(prompt_list)
 
         # バッチ処理の関数
         def process_batch(batch: List[BatchData], highres_fix, highres_1st=False):
@@ -2963,6 +3002,8 @@ def main(args):
             for i, (image, prompt, negative_prompts, seed, clip_prompt) in enumerate(
                 zip(images, prompts, negative_prompts, seeds, clip_prompts)
             ):
+                if highres_fix:
+                    seed -= 1  # record original seed
                 metadata = PngInfo()
                 metadata.add_text("prompt", prompt)
                 metadata.add_text("seed", str(seed))
@@ -3132,7 +3173,7 @@ def main(args):
                             print("predefined seeds are exhausted")
                             seed = None
                     elif args.iter_same_seed:
-                        seeds = iter_seed
+                        seed = iter_seed
                     else:
                         seed = None  # 前のを消す
 
@@ -3319,6 +3360,11 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="use same seed for all prompts in iteration if no seed specified / 乱数seedの指定がないとき繰り返し内はすべて同じseedを使う（プロンプト間の差異の比較用）",
     )
+    parser.add_argument(
+        "--shuffle_prompts",
+        action="store_true",
+        help="shuffle prompts in iteration / 繰り返し内のプロンプトをシャッフルする",
+    )
     parser.add_argument("--fp16", action="store_true", help="use fp16 / fp16を指定し省メモリ化する")
     parser.add_argument("--bf16", action="store_true", help="use bfloat16 / bfloat16を指定し省メモリ化する")
     parser.add_argument("--xformers", action="store_true", help="use xformers / xformersを使用し高速化する")
@@ -3339,12 +3385,21 @@ def setup_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--network_mul", type=float, default=None, nargs="*", help="additional network multiplier / 追加ネットワークの効果の倍率")
     parser.add_argument(
-        "--network_args", type=str, default=None, nargs="*", help="additional argmuments for network (key=value) / ネットワークへの追加の引数"
+        "--network_args", type=str, default=None, nargs="*", help="additional arguments for network (key=value) / ネットワークへの追加の引数"
     )
     parser.add_argument("--network_show_meta", action="store_true", help="show metadata of network model / ネットワークモデルのメタデータを表示する")
+    parser.add_argument(
+        "--network_merge_n_models", type=int, default=None, help="merge this number of networks / この数だけネットワークをマージする"
+    )
     parser.add_argument("--network_merge", action="store_true", help="merge network weights to original model / ネットワークの重みをマージする")
     parser.add_argument(
         "--network_pre_calc", action="store_true", help="pre-calculate network for generation / ネットワークのあらかじめ計算して生成する"
+    )
+    parser.add_argument(
+        "--network_regional_mask_max_color_codes",
+        type=int,
+        default=None,
+        help="max color codes for regional mask (default is None, mask by channel) / regional maskの最大色数（デフォルトはNoneでチャンネルごとのマスク）",
     )
     parser.add_argument(
         "--textual_inversion_embeddings",
@@ -3365,7 +3420,7 @@ def setup_parser() -> argparse.ArgumentParser:
         "--max_embeddings_multiples",
         type=int,
         default=None,
-        help="max embeding multiples, max token length is 75 * multiples / トークン長をデフォルトの何倍とするか 75*この値 がトークン長となる",
+        help="max embedding multiples, max token length is 75 * multiples / トークン長をデフォルトの何倍とするか 75*この値 がトークン長となる",
     )
     parser.add_argument(
         "--clip_guidance_scale",
@@ -3424,7 +3479,7 @@ def setup_parser() -> argparse.ArgumentParser:
         "--highres_fix_upscaler_args",
         type=str,
         default=None,
-        help="additional argmuments for upscaler (key=value) / upscalerへの追加の引数",
+        help="additional arguments for upscaler (key=value) / upscalerへの追加の引数",
     )
     parser.add_argument(
         "--highres_fix_disable_control_net",
